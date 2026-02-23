@@ -23,6 +23,11 @@ The CHANGELOG for the current development version is available at
 
 - Fixes an edge-case bug where decision regions plots didn't have unique colors ([#1157](https://github.com/rasbt/mlxtend/issues/1157) via [mariam851](https://github.com/mariam851))
 
+- Added functional `tol` support to `SequentialFeatureSelector` for auto-like
+  modes (`k_features="best"`/`"parsimonious"`) with forward-stop validation.
+  ([#1079](https://github.com/rasbt/mlxtend/issues/1079) via
+  [@vaaven](https://github.com/vaaven))
+
 
 ### Version 0.24.0  (13 Dec 2025)
 

@@ -76,6 +76,13 @@ class SequentialFeatureSelector(_BaseXComposition, MetaEstimatorMixin):
         labels) stratified k-fold. Otherwise regular k-fold cross-validation
         is performed. No cross-validation if cv is None, False, or 0.
 
+    tol : float or None (default: None)
+        Early stopping tolerance. This is only active when
+        `k_features` is `"best"` or `"parsimonious"` and ignored for
+        integer or tuple input.
+        Forward selection requires `tol > 0`; backward selection allows
+        non-positive values.
+
     n_jobs : int (default: 1)
         The number of CPUs to use for evaluating different feature subsets
         in parallel. -1 means 'all CPUs'.
@@ -192,6 +199,7 @@ class SequentialFeatureSelector(_BaseXComposition, MetaEstimatorMixin):
         verbose=0,
         scoring=None,
         cv=5,
+        tol=None,
         n_jobs=1,
         pre_dispatch="2*n_jobs",
         clone_estimator=True,
@@ -215,6 +223,7 @@ class SequentialFeatureSelector(_BaseXComposition, MetaEstimatorMixin):
             )
             raise TypeError(err_msg)
         self.cv = cv
+        self.tol = tol
         self.n_jobs = n_jobs
         self.verbose = verbose
 
@@ -444,6 +453,8 @@ class SequentialFeatureSelector(_BaseXComposition, MetaEstimatorMixin):
 
         self.k_lb = max(1, len(self.fixed_features_group_set))
         self.k_ub = len(self.feature_groups_)
+        original_k_features = self.k_features
+        k_features = self.k_features
 
         if (
             not isinstance(self.k_features, int)
@@ -495,23 +506,38 @@ class SequentialFeatureSelector(_BaseXComposition, MetaEstimatorMixin):
                 # )
 
         self.is_parsimonious = False
-        if isinstance(self.k_features, str):
-            if self.k_features not in {"best", "parsimonious"}:
+        if isinstance(k_features, str):
+            if k_features not in {"best", "parsimonious"}:
                 raise AttributeError(
                     "If a string argument is provided, "
                     'it must be "best" or "parsimonious"'
                 )
-            if self.k_features == "parsimonious":
+            if k_features == "parsimonious":
                 self.is_parsimonious = True
 
-        if isinstance(self.k_features, str):
-            self.k_features = (self.k_lb, self.k_ub)
-        elif isinstance(self.k_features, int):
-            # we treat k_features as k group of features
-            self.k_features = (self.k_features, self.k_features)
+        if self.tol is not None:
+            is_auto = original_k_features in {"best", "parsimonious"}
+            if not is_auto:
+                raise ValueError(
+                    "tol is only enabled when k_features is `best` or `parsimonious`."
+                )
+            if not isinstance(self.tol, (int, float, np.number)):
+                raise TypeError("tol must be numeric.")
+            if not np.isfinite(float(self.tol)):
+                raise ValueError("tol must be finite.")
+            if self.forward and self.tol <= 0:
+                raise ValueError(
+                    "tol must be strictly positive when doing forward selection"
+                )
 
-        self.min_k = self.k_features[0]
-        self.max_k = self.k_features[1]
+        if isinstance(k_features, str):
+            k_features = (self.k_lb, self.k_ub)
+        elif isinstance(k_features, int):
+            # we treat k_features as k group of features
+            k_features = (k_features, k_features)
+
+        self.min_k = k_features[0]
+        self.max_k = k_features[1]
 
         if self.forward:
             k_idx = tuple(sorted(self.fixed_features_group_set))
@@ -536,8 +562,15 @@ class SequentialFeatureSelector(_BaseXComposition, MetaEstimatorMixin):
                 "cv_scores": k_score,
                 "avg_score": np.nanmean(k_score),
             }
+            k_score_current = np.nanmean(k_score)
+        else:
+            k_score_current = np.nan
 
         orig_set = set(range(self.k_ub))
+        auto_selection = self.tol is not None and original_k_features in {
+            "best",
+            "parsimonious",
+        }
         try:
             while k != k_stop:
                 prev_subset = set(k_idx)
@@ -548,7 +581,7 @@ class SequentialFeatureSelector(_BaseXComposition, MetaEstimatorMixin):
                     search_set = prev_subset
                     must_include_set = self.fixed_features_group_set
 
-                k_idx, k_score, cv_scores = self._feature_selector(
+                k_idx_next, k_score_next, cv_scores_next = self._feature_selector(
                     search_set,
                     must_include_set,
                     X=X_,
@@ -558,39 +591,35 @@ class SequentialFeatureSelector(_BaseXComposition, MetaEstimatorMixin):
                     feature_groups=self.feature_groups_,
                     **fit_params,
                 )
+                if k_idx_next is None:
+                    break
 
-                k = len(k_idx)
-                # floating can lead to multiple same-sized subsets
-                if k not in self.subsets_ or (k_score > self.subsets_[k]["avg_score"]):
-                    k_idx = tuple(sorted(k_idx))
-                    self.subsets_[k] = {
-                        "feature_idx": k_idx,
-                        "cv_scores": cv_scores,
-                        "avg_score": k_score,
-                    }
+                k_idx_next = tuple(sorted(k_idx_next))
+                k = len(k_idx_next)
 
                 if self.floating:
                     # floating direction is opposite of self.forward, i.e. in
                     # forward selection, we do floating in backward manner,
                     # and in backward selection, we do floating in forward manner
                     is_float_forward = not self.forward
-                    (new_feature_idx,) = set(k_idx) ^ prev_subset
+                    (new_feature_idx,) = set(k_idx_next) ^ prev_subset
                     for _ in range(X_.shape[1]):
                         if (
                             self.forward
-                            and (len(k_idx) - len(self.fixed_features_group_set)) <= 2
+                            and (len(k_idx_next) - len(self.fixed_features_group_set))
+                            <= 2
                         ):
                             break
-                        if not self.forward and (len(orig_set) - len(k_idx) <= 2):
+                        if not self.forward and (len(orig_set) - len(k_idx_next) <= 2):
                             break
 
                         if is_float_forward:
                             # corresponding to self.forward=False
                             search_set = orig_set - {new_feature_idx}
-                            must_include_set = set(k_idx)
+                            must_include_set = set(k_idx_next)
                         else:
                             # corresponding to self.forward=True
-                            search_set = set(k_idx)
+                            search_set = set(k_idx_next)
                             must_include_set = self.fixed_features_group_set | {
                                 new_feature_idx
                             }
@@ -610,7 +639,7 @@ class SequentialFeatureSelector(_BaseXComposition, MetaEstimatorMixin):
                             **fit_params,
                         )
 
-                        if k_score_c <= k_score:
+                        if k_score_c <= k_score_next:
                             break
 
                         # In the floating process, we basically revisit our previous
@@ -619,14 +648,26 @@ class SequentialFeatureSelector(_BaseXComposition, MetaEstimatorMixin):
                         if k_score_c <= self.subsets_[len(k_idx_c)]["avg_score"]:
                             break
                         else:
-                            k_idx, k_score, cv_scores = k_idx_c, k_score_c, cv_scores_c
-                            k_idx = tuple(sorted(k_idx))
-                            k = len(k_idx)
-                            self.subsets_[k] = {
-                                "feature_idx": k_idx,
-                                "cv_scores": cv_scores,
-                                "avg_score": k_score,
-                            }
+                            k_idx_next = tuple(sorted(k_idx_c))
+                            k_score_next = k_score_c
+                            cv_scores_next = cv_scores_c
+                            k = len(k_idx_next)
+
+                if auto_selection and not np.isnan(k_score_current):
+                    if (k_score_next - k_score_current) < self.tol:
+                        break
+
+                if k not in self.subsets_ or (
+                    k_score_next > self.subsets_[k]["avg_score"]
+                ):
+                    self.subsets_[k] = {
+                        "feature_idx": k_idx_next,
+                        "cv_scores": cv_scores_next,
+                        "avg_score": k_score_next,
+                    }
+
+                k_idx = k_idx_next
+                k_score_current = k_score_next
 
                 if self.verbose == 1:
                     sys.stderr.write("\rFeatures: %d/%s" % (len(k_idx), k_stop))
@@ -638,7 +679,7 @@ class SequentialFeatureSelector(_BaseXComposition, MetaEstimatorMixin):
                             datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             len(k_idx),
                             k_stop,
-                            k_score,
+                            k_score_next,
                         )
                     )
 

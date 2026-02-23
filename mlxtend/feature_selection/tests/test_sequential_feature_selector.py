@@ -5,10 +5,12 @@
 # License: BSD 3 clause
 import numpy as np
 import pandas as pd
+import pytest
 from numpy import nan
 from numpy.testing import assert_almost_equal
 from packaging.version import Version
 from sklearn import __version__ as sklearn_version
+from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.datasets import load_iris
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
@@ -24,6 +26,17 @@ from mlxtend.feature_selection import SequentialFeatureSelector as SFS
 from mlxtend.utils import assert_raises
 
 
+class ConstantRegressor(BaseEstimator, RegressorMixin):
+    def __init__(self, constant=0.0):
+        self.constant = constant
+
+    def fit(self, X, y):
+        return self
+
+    def predict(self, X):
+        return np.repeat(self.constant, X.shape[0])
+
+
 def nan_roc_auc_score(y_true, y_score, average="macro", sample_weight=None):
     if len(np.unique(y_true)) != 2:
         return np.nan
@@ -31,6 +44,10 @@ def nan_roc_auc_score(y_true, y_score, average="macro", sample_weight=None):
         return roc_auc_score(
             y_true, y_score, average=average, sample_weight=sample_weight
         )
+
+
+def inverse_size_score(estimator, X, y):
+    return -float(X.shape[1] ** 2)
 
 
 def dict_compare_utility(d_actual, d_desired, decimal=2):
@@ -131,6 +148,151 @@ def test_kfeatures_type_5():
     )
     sfs = SFS(estimator=knn, verbose=0, k_features=(3, 1))
     assert_raises(AttributeError, expect, sfs.fit, X, y)
+
+
+def test_tol_scope_integer_k_features_raises():
+    X = np.arange(40).reshape((20, 2))
+    y = np.array([0, 1] * 10)
+
+    sfs = SFS(
+        ConstantRegressor(),
+        k_features=1,
+        tol=0.1,
+        scoring="neg_mean_squared_error",
+        cv=0,
+    )
+
+    expect = "tol is only enabled when k_features is `best` or `parsimonious`."
+    assert_raises(ValueError, expect, sfs.fit, X, y)
+
+
+def test_tol_scope_tuple_k_features_raises():
+    X = np.arange(40).reshape((20, 2))
+    y = np.array([0, 1] * 10)
+
+    sfs = SFS(
+        ConstantRegressor(),
+        k_features=(1, 2),
+        tol=0.1,
+        scoring="neg_mean_squared_error",
+        cv=0,
+    )
+
+    expect = "tol is only enabled when k_features is `best` or `parsimonious`."
+    assert_raises(ValueError, expect, sfs.fit, X, y)
+
+
+def test_tol_forward_requires_positive():
+    X = np.arange(40).reshape((20, 2))
+    y = np.array([0, 1] * 10)
+
+    sfs = SFS(
+        ConstantRegressor(),
+        k_features="best",
+        forward=True,
+        tol=0.0,
+        scoring="neg_mean_squared_error",
+        cv=0,
+    )
+    expect = "tol must be strictly positive when doing forward selection"
+    assert_raises(ValueError, expect, sfs.fit, X, y)
+
+
+def test_tol_backwards_allows_negative():
+    X = np.arange(40).reshape((20, 2))
+    y = np.array([0, 1] * 10)
+
+    sfs = SFS(
+        ConstantRegressor(),
+        k_features="best",
+        forward=False,
+        tol=-0.1,
+        scoring="neg_mean_squared_error",
+        cv=0,
+        verbose=0,
+    )
+    sfs = sfs.fit(X, y)
+    assert len(sfs.subsets_) > 1
+
+
+def test_tol_early_stops_in_best_mode():
+    X = np.arange(80).reshape((20, 4))
+    y = np.arange(20)
+
+    sfs = SFS(
+        ConstantRegressor(),
+        k_features="best",
+        forward=True,
+        tol=0.1,
+        scoring="neg_mean_squared_error",
+        cv=0,
+        verbose=0,
+    )
+    sfs.fit(X, y)
+    assert len(sfs.k_feature_idx_) == 1
+    assert len(sfs.subsets_) == 1
+
+
+def test_tol_multiple_fit_calls_with_auto_mode():
+    X = np.arange(80).reshape((20, 4))
+    y = np.arange(20)
+
+    sfs = SFS(
+        ConstantRegressor(),
+        k_features="best",
+        forward=True,
+        tol=0.1,
+        scoring="neg_mean_squared_error",
+        cv=0,
+        verbose=0,
+    )
+    sfs.fit(X, y)
+    sfs.fit(X, y)
+    assert sfs.k_features == "best"
+
+
+def test_tol_negative_scale_stops_in_best_and_parsimonious():
+    X = np.arange(80).reshape((20, 4))
+    y = np.arange(20)
+
+    for mode in ("best", "parsimonious"):
+        sfs = SFS(
+            ConstantRegressor(),
+            k_features=mode,
+            forward=True,
+            tol=0.5,
+            scoring=inverse_size_score,
+            cv=0,
+            verbose=0,
+        )
+        sfs.fit(X, y)
+        assert len(sfs.k_feature_idx_) == 1
+        assert len(sfs.subsets_) == 1
+
+
+@pytest.mark.parametrize("forward", [True, False])
+def test_tol_cv0_deterministic_forward_backward(forward):
+    X = np.arange(80).reshape((20, 4))
+    y = np.arange(20)
+    tol = 0.5 if forward else -0.01
+
+    sfs = SFS(
+        ConstantRegressor(),
+        k_features="best",
+        forward=forward,
+        tol=tol,
+        scoring="neg_mean_squared_error",
+        cv=0,
+        verbose=0,
+    )
+    sfs.fit(X, y)
+
+    if forward:
+        assert len(sfs.k_feature_idx_) == 1
+        assert len(sfs.subsets_) == 1
+    else:
+        assert len(sfs.k_feature_idx_) == 4
+        assert len(sfs.subsets_) == 4
 
 
 def test_knn_wo_cv():
